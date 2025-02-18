@@ -220,5 +220,7 @@ class Nl2qResource(Resource):
                 "Please try again later!"
             )
             return jsonify(result_schema)
+        # The model sometimes output triple backticks that needs to be removed.
+        result_schema["query_string"] = response.strip("```")
 
         return jsonify(result_schema)
