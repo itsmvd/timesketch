@@ -22,6 +22,7 @@ from flask import current_app
 from flask_restful import Resource
 from flask_login import login_required
 from flask_login import current_user
+from timesketch.lib.llms.client import LLMClientService
 
 import pandas as pd
 
@@ -39,7 +40,7 @@ logger = logging.getLogger("timesketch.api_nl2q")
 
 class Nl2qResource(Resource):
     """Resource to get NL2Q prediction."""
-
+    llm_service = LLMClientService()
     def build_prompt(self, question, sketch_id):
         """Builds the prompt.
 
@@ -49,13 +50,11 @@ class Nl2qResource(Resource):
         Return:
           String containing the whole prompt.
         """
-        prompt = ""
-        examples = ""
         prompt_file = current_app.config.get("PROMPT_NL2Q", "")
         examples_file = current_app.config.get("EXAMPLES_NL2Q", "")
         try:
             with open(prompt_file, "r") as file:
-                prompt = file.read()
+                prompt_template = file.read()
         except (OSError, IOError):
             abort(HTTP_STATUS_CODE_INTERNAL_SERVER_ERROR, "No prompt file found")
         try:
@@ -63,10 +62,17 @@ class Nl2qResource(Resource):
                 examples = file.read()
         except (OSError, IOError):
             abort(HTTP_STATUS_CODE_INTERNAL_SERVER_ERROR, "No examples file found")
-        prompt = prompt.format(
-            examples=examples,
-            question=question,
-            data_types=self.data_types_descriptions(self.sketch_data_types(sketch_id)),
+        
+        prompt = self.llm_service.prompt_from_template(
+            "nl2q",
+            prompt_template,
+            {
+                "examples": examples,
+                "question": question,
+                "data_types": self.data_types_descriptions(
+                    self.sketch_data_types(sketch_id)
+                ),
+            },
         )
         return prompt
 
@@ -202,18 +208,11 @@ class Nl2qResource(Resource):
             "error": None,
         }
 
-        feature_name = "nl2q"
         try:
-            llm = manager.LLMManager.create_provider(feature_name=feature_name)
-        except Exception as e:  # pylint: disable=broad-except
-            logger.error("Error LLM Provider: {}".format(e))
-            result_schema["error"] = (
-                "Error loading LLM Provider. Please try again later!"
+            response = self.llm_service.generate_with_timeout(
+                feature_name="nl2q", prompt=prompt
             )
-            return jsonify(result_schema)
-
-        try:
-            prediction = llm.generate(prompt)
+            result_schema["query_string"] = response.get("response", "").strip("```")
         except Exception as e:  # pylint: disable=broad-except
             logger.error("Error NL2Q prompt: {}".format(e))
             result_schema["error"] = (
@@ -222,5 +221,4 @@ class Nl2qResource(Resource):
             )
             return jsonify(result_schema)
 
-        result_schema["query_string"] = prediction.strip("```")
         return jsonify(result_schema)
