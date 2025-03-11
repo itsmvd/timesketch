@@ -15,44 +15,42 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 import Vue from 'vue'
-
 const defaultTimeout = 5000
-const defaultSnackBar = {
-    "message": "",
-    "color": "info",
-    "timeout": defaultTimeout
-}
 
 // These methods will be available to all components without any further imports.
 Vue.mixin({
     methods: {
-        successSnackBar(message, timeout) {
-            let snackbar = defaultSnackBar
-            snackbar.message = message
-            snackbar.color = "success"
-            snackbar.timeout = timeout || defaultTimeout
+        successSnackBar(message, timeout = defaultTimeout) {
+            const snackbar = {
+                message: message,
+                color: "success",
+                timeout: timeout
+            }
             this.$store.dispatch('setSnackBar', snackbar)
         },
-        errorSnackBar(message, timeout) {
-            let snackbar = defaultSnackBar
-            snackbar.message = message
-            snackbar.color = "error"
-            snackbar.timeout = timeout || defaultTimeout
+        errorSnackBar(message, timeout = defaultTimeout) {
+            const snackbar = {
+                message: message,
+                color: "error",
+                timeout: timeout
+            }
             this.$store.dispatch('setSnackBar', snackbar)
         },
-        warningSnackBar(message, timeout) {
-          let snackbar = defaultSnackBar
-          snackbar.message = message
-          snackbar.color = "warning"
-          snackbar.timeout = timeout || defaultTimeout
-          this.$store.dispatch('setSnackBar', snackbar)
+        warningSnackBar(message, timeout = defaultTimeout) {
+            const snackbar = {
+                message: message,
+                color: "warning",
+                timeout: timeout
+            }
+            this.$store.dispatch('setSnackBar', snackbar)
         },
-        infoSnackBar(message, timeout) {
-          let snackbar = defaultSnackBar
-          snackbar.message = message
-          snackbar.color = "info"
-          snackbar.timeout = timeout || defaultTimeout
-          this.$store.dispatch('setSnackBar', snackbar)
-      },
+        infoSnackBar(message, timeout = 2000) {
+            const snackbar = {
+                message: message,
+                color: "info",
+                timeout: timeout
+            }
+            this.$store.dispatch('setSnackBar', snackbar)
+        },
     }
 })
