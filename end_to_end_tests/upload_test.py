@@ -14,6 +14,7 @@
 """End to end tests of Timesketch upload functionality."""
 import os
 import random
+import json
 
 from timesketch_api_client import search
 from . import interface
@@ -85,6 +86,61 @@ class UploadTest(interface.BaseEndToEndTest):
         # check that the number of events is correct with a different method
         events = sketch.explore("data_type:foobarjson", as_pandas=True)
         self.assertions.assertEqual(len(events), 4123)
+
+    def test_upload_jsonl_mapping_exceeds_limit(self):
+        """Test uploading a timeline with a jsonl events that exceeds the
+        default field mapping limit of 1000. The test will create a temporary
+        file with events that have many unique keys and then upload the file to
+        Timesketch. The test will then check that the correct error is triggered.
+        """
+
+        # create a new sketch
+        rand = random.randint(0, 10000)
+        sketch = self.api.create_sketch(
+            name=f"test_upload_jsonl_mapping_exceeds_limit {rand}"
+        )
+        self.sketch = sketch
+
+        file_path = "/tmp/mapping_over_1k.jsonl"
+        num_lines = 100
+        num_keys_per_line = 6
+        all_keys = set()
+
+        with open(file_path, "w", encoding="utf-8") as file_object:
+            for i in range(num_lines):
+                line_data = {
+                    "datetime": "2015-07-24T19:01:01+00:00",
+                    "message": f"Event {i} of {num_lines}",
+                    "timestamp_desc": "test",
+                    "data_type": "test:jsonl",
+                }
+                for j in range(num_keys_per_line):
+                    key = f"field_name_{j}_{random.randint(0, 100000)}"
+                    while key in all_keys:  # Avoid duplicate keys
+                        key = f"field_name_{random.randint(0, 100000)}"
+                    all_keys.add(key)
+                    line_data[key] = f"value_{j}_{random.randint(0, 10000)}"
+
+                json.dump(line_data, file_object)
+                file_object.write("\n")
+
+        try:
+            self.import_timeline(file_path, index_name=rand, sketch=sketch)
+        except RuntimeError:
+            print(
+                "Timeline import failing is expected. Checking for the correct "
+                "error message..."
+            )
+        os.remove(file_path)
+
+        timeline = sketch.list_timelines()[0]
+        # check that timeline threw the correct error
+        self.assertions.assertEqual(timeline.name, file_path)
+        self.assertions.assertEqual(timeline.index.name, str(rand))
+        self.assertions.assertEqual(timeline.index.status, "fail")
+        self.assertions.assertIn(
+            "OPENSEARCH_MAPPING_UPPER_LIMIT", timeline.data_sources[0]["error_message"]
+        )
 
     def test_very_large_upload_jsonl(self):
         """Test uploading a timeline with over 50 k events as jsonl. The test
@@ -229,6 +285,110 @@ class UploadTest(interface.BaseEndToEndTest):
         # check that the number of events is correct with a different method
         events = sketch.explore("data_type:73kcsv", as_pandas=True, max_entries=100000)
         self.assertions.assertEqual(len(events), 73251)
+
+    def test_datetime_out_of_normal_range_in_csv(self):
+        """Test uploading a file with events from way back and some
+        in a distant future. This test can reveal edge cases that might occur
+        when tools produce a "fake" datetime value"""
+
+        rand = str(random.randint(0, 10000))
+        sketch = self.api.create_sketch(
+            name=f"datetime_out_of_normal_range_in_csv_{rand}"
+        )
+        self.sketch = sketch
+        file_path = "/usr/local/src/timesketch/tests/test_events/validate_time_out_of_range.csv"  # pylint: disable=line-too-long
+        self.import_timeline(file_path, index_name=rand, sketch=sketch)
+        timeline = sketch.list_timelines()[0]
+        # check that timeline was uploaded correctly
+        self.assertions.assertEqual(timeline.name, file_path)
+        self.assertions.assertEqual(timeline.index.name, str(rand))
+        self.assertions.assertEqual(timeline.index.status, "ready")
+
+        # Search for the very old event
+        search_obj = search.Search(sketch)
+        search_obj.query_string = "data_type:csv_very_old_event"
+        search_obj.commit()
+        self.assertions.assertEqual(len(search_obj.table), 1)
+        self.assertions.assertEqual(
+            "1601-01-01" in str(search_obj.table["datetime"]), True
+        )
+
+        # Search for future event check if datetime value is in the result
+        search_obj2 = search.Search(sketch)
+        search_obj2.query_string = "data_type:csv_very_future_event"
+        search_obj2.commit()
+        self.assertions.assertEqual(len(search_obj2.table), 1)
+        self.assertions.assertEqual(
+            "2227-12-31" in str(search_obj2.table["datetime"]), True
+        )
+
+    def test_csv_different_timestamps(self):
+        """Test uploading a timeline with different precision of timestamps."""
+
+        # create a new sketch
+        rand = str(random.randint(0, 10000))
+        sketch = self.api.create_sketch(name=f"csv_different_timestamps_{rand}")
+        self.sketch = sketch
+
+        file_path = "/tmp/timestamptest.csv"
+
+        with open(file_path, "w", encoding="utf-8") as file_object:
+            file_object.write(
+                '"message","timestamp","datetime","timestamp_desc","data_type"\n'
+            )
+            string = (
+                '"total precision","123456789",'
+                '"2024-07-24T10:57:02.877297Z","Write time","timestamptest"\n'
+            )
+            file_object.write(string)
+            string = (
+                '"ISO8601","1331698658276340",'
+                '"2015-07-24T19:01:01+00:00","Write time","timestamptest"\n'
+            )
+            file_object.write(string)
+            string = (
+                '"Wrong epoch","123456",'
+                '"2015-07-24 19:01:01","Write time","timestamptest fail"\n'
+            )
+            file_object.write(string)
+            string = '"no_datetime","123456","","Write time","no_datetime"\n'
+            file_object.write(string)
+            string = (
+                '"Notimestamp","",'
+                '"2015-07-24 19:01:01","Write time","no_timestamp"\n'
+            )
+            file_object.write(string)
+            string = (
+                '"Accurate_timestamp","1331712840499027",'
+                '"2015-07-24 19:01:01","Write time","Accurate_timestamp"\n'
+            )
+            file_object.write(string)
+
+        self.import_timeline("/tmp/timestamptest.csv", index_name=rand, sketch=sketch)
+        os.remove(file_path)
+
+        timeline = sketch.list_timelines()[0]
+        # check that timeline was uploaded correctly
+        self.assertions.assertEqual(timeline.name, file_path)
+        self.assertions.assertEqual(timeline.index.name, str(rand))
+        self.assertions.assertEqual(timeline.index.status, "ready")
+
+        search_obj = search.Search(sketch)
+        search_obj.query_string = "data_type:timestamptest"
+        search_obj.commit()
+        self.assertions.assertEqual(len(search_obj.table), 3)
+
+        # check that the number of events is correct with a different method
+        events = sketch.explore("data_type:timestamptest", as_pandas=True)
+        self.assertions.assertEqual(len(events), 3)
+
+        # check that events with no timestamp
+        events = sketch.explore("data_type:no_timestamp", as_pandas=True)
+        self.assertions.assertEqual(len(events), 1)
+
+        # check number of events with no datetime
+        events = sketch.explore("data_type:no_datetime", as_pandas=True)
+        self.assertions.assertEqual(len(events), 1)
 
 
 manager.EndToEndTestManager.register_test(UploadTest)

@@ -49,14 +49,18 @@ def cli():
 
 
 @cli.command(name="list-users")
-def list_users():
+@click.option("--status", "-s", is_flag=True, help="Show status of the users.")
+def list_users(status):
     """List all users."""
     for user in User.query.all():
         if user.admin:
             extra = " (admin)"
         else:
             extra = ""
-        print(f"{user.username}{extra}")
+        if status:
+            print(f"{user.username}{extra} (active: {user.active})")
+        else:
+            print(f"{user.username}{extra}")
 
 
 @cli.command(name="create-user")
@@ -175,8 +179,8 @@ def drop_db():
         if click.confirm(
             "Are you REALLLY sure you want to DROP ALL the database tables?"
         ):
-            print("All tables dropped. Database is now empty.")
             drop_all()
+            print("All tables dropped. Database is now empty.")
 
 
 @cli.command(name="list-sketches")
@@ -192,10 +196,17 @@ def list_sketches():
 
 
 @cli.command(name="list-groups")
-def list_groups():
+@click.option("--showmembership", is_flag=True, help="Show members of that group.")
+def list_groups(showmembership):
     """List all groups."""
     for group in Group.query.all():
-        print(group.name)
+        if showmembership:
+            users = []
+            for user in group.users:
+                users.append(user.username)
+            print(f"{group.name}:{','.join(users)}")
+        else:
+            print(group.name)
 
 
 @cli.command(name="create-group")
@@ -285,7 +296,7 @@ def import_search_templates(path):
             search_templates = yaml.safe_load(fh.read())
 
         if isinstance(search_templates, dict):
-            search_template_list = [search_template_list]
+            search_templates = [search_templates]
 
         if search_templates:
             for search_template_dict in search_templates:
@@ -563,6 +574,7 @@ def sketch_info(sketch_id):
                 "created_at",
                 "user_id",
                 "description",
+                "status",
             ],
         ]
 
@@ -574,9 +586,9 @@ def sketch_info(sketch_id):
                     t.created_at,
                     t.user_id,
                     t.description,
+                    t.status[0].status,
                 ]
             )
-
         print_table(table_data)
 
         print("Shared with:")
@@ -600,12 +612,95 @@ def sketch_info(sketch_id):
                 "user_id",
             ],
         ]
-        for status in sketch.status:
+        for _status in sketch.status:
             status_table.append(
-                [status.id, status.status, status.created_at, status.user_id]
+                [_status.id, _status.status, _status.created_at, _status.user_id]
             )
         print("Status:")
         print_table(status_table)
+
+
+@cli.command(name="timeline-status")
+@click.argument("timeline_id")
+@click.option(
+    "--action",
+    default="get",
+    type=click.Choice(["get", "set"]),
+    required=False,
+    help="get or set timeline status.",
+)
+@click.option(
+    "--status",
+    required=False,
+    type=click.Choice(["ready", "processing", "fail"]),
+    help="get or set timeline status.",
+)
+def timeline_status(timeline_id, action, status):
+    """Get or set a timeline status
+
+    If "action" is "set", the given value of status will be written in the status.
+
+    Args:
+        action: get or set timeline status.
+        status: timeline status. Only valid choices are ready, processing, fail.
+    """
+    if action == "get":
+        timeline = Timeline.query.filter_by(id=timeline_id).first()
+        if not timeline:
+            print("Timeline does not exist.")
+            return
+        # define the table data
+        table_data = [
+            [
+                "searchindex_id",
+                "index_name",
+                "created_at",
+                "user_id",
+                "description",
+                "status",
+            ],
+        ]
+        table_data.append(
+            [
+                timeline.searchindex_id,
+                timeline.searchindex.index_name,
+                timeline.created_at,
+                timeline.user_id,
+                timeline.description,
+                timeline.status[0].status,
+            ]
+        )
+        print_table(table_data)
+
+        status_table = [
+            [
+                "id",
+                "status",
+                "created_at",
+                "user_id",
+            ],
+        ]
+        for _status in timeline.status:
+            status_table.append(
+                [_status.id, _status.status, _status.created_at, _status.user_id]
+            )
+        print("Status:")
+        print_table(status_table)
+
+    elif action == "set":
+        timeline = Timeline.query.filter_by(id=timeline_id).first()
+        if not timeline:
+            print("Timeline does not exist.")
+            return
+        # exit if status is not set
+        if not status:
+            print("Status is not set.")
+            return
+        timeline.set_status(status)
+        db_session.commit()
+        print(f"Timeline {timeline_id} status set to {status}")
+        # to verify run:
+        print(f"To verify run: tsctl timeline-status {timeline_id} --action get")
 
 
 @cli.command(name="validate-context-links-conf")
@@ -730,6 +825,77 @@ def searchindex_info(searchindex_id):
     print(f"Corresponding Sketch id: {sketch.id} Sketch name: {sketch.name}")
 
 
+@cli.command(name="searchindex-status")
+@click.argument("searchindex_id")
+@click.option(
+    "--action",
+    default="get",
+    type=click.Choice(["get", "set"]),
+    required=False,
+    help="get or set timeline status.",
+)
+@click.option(
+    "--status",
+    required=False,
+    type=click.Choice(["ready", "processing", "fail"]),
+    help="get or set timeline status.",
+)
+@click.option(
+    "--searchindex_id",
+    required=True,
+    help="Searchindex ID to search for e.g. 4c5afdf60c6e49499801368b7f238353.",
+)
+def searchindex_status(searchindex_id, action, status):
+    """Get or set a searchindex status
+
+    If "action" is "set", the given value of status will be written in the status.
+
+    Args:
+        action: get or set searchindex status.
+        status: searchindex status. Only valid choices are ready, processing, fail.
+    """
+    if action == "get":
+        searchindex = SearchIndex.query.filter_by(id=searchindex_id).first()
+        if not searchindex:
+            print("Searchindex does not exist.")
+            return
+        table_data = [
+            [
+                "searchindex_id",
+                "index_name",
+                "created_at",
+                "user_id",
+                "description",
+                "status",
+            ],
+        ]
+        table_data.append(
+            [
+                searchindex.id,
+                searchindex.index_name,
+                searchindex.created_at,
+                searchindex.user_id,
+                searchindex.description,
+                searchindex.status[0].status,
+            ]
+        )
+        print_table(table_data)
+    elif action == "set":
+        searchindex = SearchIndex.query.filter_by(id=searchindex_id).first()
+        if not searchindex:
+            print("Searchindex does not exist.")
+            return
+        # exit if status is not set
+        if not status:
+            print("Status is not set.")
+            return
+        searchindex.set_status(status)
+        db_session.commit()
+        print(f"Searchindex {searchindex_id} status set to {status}")
+        # to verify run:
+        print(f"To verify run: tsctl searchindex-status {searchindex_id} --action get")
+
+
 # Analyzer stats cli command
 @cli.command(name="analyzer-stats")
 @click.argument(
@@ -757,7 +923,14 @@ def searchindex_info(searchindex_id):
     required=False,
     help="Limit the number of results.",
 )
-def analyzer_stats(analyzer_name, timeline_id, scope, result_text_search, limit):
+@click.option(
+    "--export_csv",
+    required=False,
+    help="Export the results to a CSV file.",
+)
+def analyzer_stats(
+    analyzer_name, timeline_id, scope, result_text_search, limit, export_csv
+):
     """Prints analyzer stats."""
 
     if timeline_id:
@@ -789,6 +962,7 @@ def analyzer_stats(analyzer_name, timeline_id, scope, result_text_search, limit)
         new_row = pd.DataFrame(
             [
                 {
+                    "analyzer_name": analysis.analyzer_name,
                     "runtime": analysis.updated_at - analysis.created_at,
                     "hits": matches,
                     "timeline_id": analysis.timeline_id,
@@ -832,5 +1006,9 @@ def analyzer_stats(analyzer_name, timeline_id, scope, result_text_search, limit)
     if analyzer_name != "sigma":
         df = df.drop(columns=["hits"])
 
-    pd.options.display.max_colwidth = 500
-    print(df)
+    if export_csv:
+        df.to_csv(export_csv, index=False)
+        print(f"Analyzer stats exported to {export_csv}")
+    else:
+        pd.options.display.max_colwidth = 500
+        print(df)

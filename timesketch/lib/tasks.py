@@ -15,40 +15,34 @@
 
 from __future__ import unicode_literals
 
-import os
-import logging
-import subprocess
-import traceback
-
 import codecs
+from hashlib import sha1
 import io
 import json
-from hashlib import sha1
+import logging
+import os
+import subprocess
+import time
+import traceback
 import six
 import yaml
-
-from opensearchpy.exceptions import NotFoundError
-from opensearchpy.exceptions import RequestError
-from flask import current_app
+import prometheus_client
 
 from celery import chain
 from celery import group
 from celery import signals
+from flask import current_app
+from opensearchpy.exceptions import NotFoundError
+from opensearchpy.exceptions import RequestError
 from sqlalchemy import create_engine
-
-# To be able to determine plaso's version.
-try:
-    import plaso
-    from plaso.cli import pinfo_tool
-except ImportError:
-    plaso = None
-
 from timesketch.app import configure_logger
 from timesketch.app import create_celery_app
 from timesketch.lib import datafinder
 from timesketch.lib import errors
 from timesketch.lib.analyzers import manager
+from timesketch.lib.analyzers.dfiq_plugins.manager import DFIQAnalyzerManager
 from timesketch.lib.datastores.opensearch import OpenSearchDataStore
+from timesketch.lib.definitions import METRICS_NAMESPACE
 from timesketch.lib.utils import read_and_validate_csv
 from timesketch.lib.utils import read_and_validate_jsonl
 from timesketch.lib.utils import send_email
@@ -58,7 +52,62 @@ from timesketch.models.sketch import AnalysisSession
 from timesketch.models.sketch import SearchIndex
 from timesketch.models.sketch import Sketch
 from timesketch.models.sketch import Timeline
+from timesketch.models.sketch import InvestigativeQuestionApproach
+from timesketch.models.sketch import InvestigativeQuestionConclusion
 from timesketch.models.user import User
+
+
+# Metrics definitions
+METRICS = {
+    "worker_csv_jsonl_runs": prometheus_client.Counter(
+        "worker_csv_jsonl_runs",
+        "Number of times the run_csv_jsonl task has been run",
+        namespace=METRICS_NAMESPACE,
+    ),
+    "worker_mapping_increase": prometheus_client.Gauge(
+        "worker_mapping_increase",
+        "Number of times a mapping increase is requested",
+        ["index_name", "timeline_id"],
+        namespace=METRICS_NAMESPACE,
+    ),
+    "worker_mapping_increase_limit_exceeded": prometheus_client.Counter(
+        "worker_mapping_increase_limit_exceeded",
+        "Number of times the OpenSearch mapping increase ran into the upper limit",
+        ["index_name"],
+        namespace=METRICS_NAMESPACE,
+    ),
+    "worker_files_parsed": prometheus_client.Counter(
+        "worker_files_parsed",
+        "Number of files parsed by the worker task",
+        ["source_type"],
+        namespace=METRICS_NAMESPACE,
+    ),
+    "worker_events_added": prometheus_client.Gauge(
+        "worker_events_added",
+        "Number of events added by the worker parsing task",
+        ["index_name", "timeline_id", "source_type"],
+        namespace=METRICS_NAMESPACE,
+    ),
+    "worker_import_errors": prometheus_client.Counter(
+        "worker_import_errors",
+        "Number of errors during the import",
+        ["index_name", "error_type"],
+        namespace=METRICS_NAMESPACE,
+    ),
+    "worker_run_time": prometheus_client.Summary(
+        "worker_run_time_seconds",
+        "Runtime of the worker task in seconds",
+        ["index_name", "timeline_id", "source_type"],
+        namespace=METRICS_NAMESPACE,
+    ),
+}
+
+# To be able to determine plaso's version.
+try:
+    import plaso
+    from plaso.cli import pinfo_tool
+except ImportError:
+    plaso = None
 
 
 logger = logging.getLogger("timesketch.tasks")
@@ -99,6 +148,10 @@ def get_import_errors(error_container, index_name, total_count):
 
     if error_types:
         top_type = error_types.most_common()[0][0]
+        for error_type in error_types:
+            METRICS["worker_import_errors"].labels(
+                index_name=index_name, error_type=error_type
+            ).inc(error_types.get(error_type, 0))
     else:
         top_type = "Unknown Reasons"
 
@@ -167,9 +220,11 @@ def _close_index(index_name, data_store, timeline_id):
 
 def _set_timeline_status(timeline_id, status, error_msg=None):
     """Helper function to set status for searchindex and all related timelines.
+
     Args:
         timeline_id: Timeline ID.
     """
+    # TODO: Clean-up function, since neither status nor error_msg are used!
     timeline = Timeline.get_by_id(timeline_id)
     if not timeline:
         logger.warning("Cannot set status: No such timeline")
@@ -193,6 +248,32 @@ def _set_timeline_status(timeline_id, status, error_msg=None):
     # Commit changes to database
     db_session.add(timeline)
     db_session.commit()
+
+    # Refresh the index so it is searchable for the analyzers right away.
+    datastore = OpenSearchDataStore(
+        host=current_app.config["OPENSEARCH_HOST"],
+        port=current_app.config["OPENSEARCH_PORT"],
+    )
+    try:
+        datastore.client.indices.refresh(index=timeline.searchindex.index_name)
+    except NotFoundError:
+        logger.error(
+            "Unable to refresh index: {0:s}, not found, "
+            "removing from list.".format(timeline.searchindex.index_name)
+        )
+
+    # If status is set to ready, check for analyzers to execute.
+    if timeline.get_status.status == "ready":
+        analyzer_manager = DFIQAnalyzerManager(sketch=timeline.sketch)
+        sessions = analyzer_manager.trigger_analyzers_for_timelines(
+            timelines=[timeline]
+        )
+        if sessions:
+            logger.info(
+                "Executed %d analyzers on the new timeline: '%s'",
+                len(sessions),
+                timeline.name,
+            )
 
 
 def _set_datasource_status(timeline_id, file_path, status, error_message=None):
@@ -324,6 +405,43 @@ def build_index_pipeline(
     return chain(index_task)
 
 
+def _create_question_conclusion(user_id, approach_id, analysis_results, analysis):
+    """Creates a QuestionConclusion for a user and approach.
+
+    Args:
+        user_id (int): The user ID.
+        approach_id (int):  The approach ID.
+        conclusion (str): The actual conclusion of the analysis.
+
+    Returns:
+        InvestigativeQuestionConclusion: A QuestionConclusion object or None.
+    """
+    approach = InvestigativeQuestionApproach.get_by_id(approach_id)
+    if not approach:
+        logging.error("No approach with ID '%d' found.", approach_id)
+        return None
+
+    if not analysis_results:
+        logging.error(
+            "Can't create an InvestigativeQuestionConclusion without any "
+            "conclusion or analysis_results provided."
+        )
+        return None
+
+    # TODO: (jkppr) Parse the analysis_results and extract added stories,
+    # searches, graphs, aggregations and add to the object!
+    question_conclusion = InvestigativeQuestionConclusion(
+        conclusion=analysis_results,
+        investigativequestion_id=approach.investigativequestion_id,
+        automated=True,
+    )
+    question_conclusion.analysis.append(analysis)
+    db_session.add(question_conclusion)
+    db_session.commit()
+
+    return question_conclusion if question_conclusion else None
+
+
 def build_sketch_analysis_pipeline(
     sketch_id,
     searchindex_id,
@@ -332,6 +450,8 @@ def build_sketch_analysis_pipeline(
     analyzer_kwargs=None,
     analyzer_force_run=False,
     timeline_id=None,
+    include_dfiq=False,
+    approach_id=None,
 ):
     """Build a pipeline for sketch analysis.
 
@@ -349,13 +469,14 @@ def build_sketch_analysis_pipeline(
         analyzer_kwargs (dict): Arguments to the analyzers.
         analyzer_force_run (bool): If true then force the analyzer to run.
         timeline_id (int): Optional int of the timeline to run the analyzer on.
+        include_dfiq (bool): If trie then include dfiq analyzers in the task.
+        approach_id (int): Optional ID of the approach triggering the analyzer.
 
     Returns:
         A tuple with a Celery group with analysis tasks or None if no analyzers
         are enabled and an analyzer session ID.
     """
     tasks = []
-
     if not analyzer_names:
         analyzer_names = current_app.config.get("AUTO_SKETCH_ANALYZERS", [])
         if not analyzer_kwargs:
@@ -377,7 +498,7 @@ def build_sketch_analysis_pipeline(
     analysis_session = AnalysisSession(user=user, sketch=sketch)
     db_session.add(analysis_session)
 
-    analyzers = manager.AnalysisManager.get_analyzers(analyzer_names)
+    analyzers = manager.AnalysisManager.get_analyzers(analyzer_names, include_dfiq)
     for analyzer_name, analyzer_class in analyzers:
         base_kwargs = analyzer_kwargs.get(analyzer_name, {})
         searchindex = SearchIndex.get_by_id(searchindex_id)
@@ -436,6 +557,7 @@ def build_sketch_analysis_pipeline(
                 user=user,
                 sketch=sketch,
                 timeline=timeline,
+                approach_id=approach_id,
             )
             analysis.add_attribute(name="kwargs_hash", value=kwargs_list_hash)
             analysis.set_status("PENDING")
@@ -452,7 +574,6 @@ def build_sketch_analysis_pipeline(
                     **kwargs,
                 )
             )
-
     # Commit the analysis session to the database.
     if len(analysis_session.analyses) > 0:
         db_session.add(analysis_session)
@@ -568,6 +689,19 @@ def run_sketch_analyzer(
 
     result = analyzer.run_wrapper(analysis_id)
     logger.info("[{0:s}] result: {1:s}".format(analyzer_name, result))
+    if hasattr(analyzer_class, "IS_DFIQ_ANALYZER") and analyzer_class.IS_DFIQ_ANALYZER:
+        analysis = Analysis.get_by_id(analysis_id)
+        user_id = analysis.user.id
+        approach_id = analysis.approach_id
+        question_conclusion = _create_question_conclusion(
+            user_id, approach_id, result, analysis
+        )
+        if question_conclusion:
+            logger.info(
+                '[{0:s}] added a conclusion to dfiq: "{1:s}"'.format(
+                    analyzer_name, question_conclusion.investigativequestion.name
+                )
+            )
     return index_name
 
 
@@ -589,6 +723,7 @@ def run_plaso(file_path, events, timeline_name, index_name, source_type, timelin
     Returns:
         Name (str) of the index.
     """
+    time_start = time.time()
     if not plaso:
         raise RuntimeError(
             ("Plaso isn't installed, " "unable to continue processing plaso files.")
@@ -744,6 +879,10 @@ def run_plaso(file_path, events, timeline_name, index_name, source_type, timelin
 
     # Mark the searchindex and timelines as ready
     _set_datasource_status(timeline_id, file_path, "ready")
+    time_took_to_run = time.time() - time_start
+    METRICS["worker_run_time"].labels(
+        index_name=index_name, timeline_id=timeline_id, source_type=source_type
+    ).observe(time_took_to_run)
     return index_name
 
 
@@ -775,11 +914,15 @@ def run_csv_jsonl(
     Returns:
         Name (str) of the index.
     """
+    METRICS["worker_csv_jsonl_runs"].inc()
+    time_start = time.time()
+
     if events:
         file_handle = io.StringIO(events)
         source_type = "jsonl"
     else:
         file_handle = codecs.open(file_path, "r", encoding="utf-8", errors="replace")
+        METRICS["worker_files_parsed"].labels(source_type=source_type).inc()
 
     validators = {
         "csv": read_and_validate_csv,
@@ -837,13 +980,77 @@ def run_csv_jsonl(
     final_counter = 0
     error_msg = ""
     error_count = 0
+    unique_keys = set()
+    limit_buffer_percentage = float(
+        current_app.config.get("OPENSEARCH_MAPPING_BUFFER", 0.1)
+    )
+    upper_mapping_limit = int(
+        current_app.config.get("OPENSEARCH_MAPPING_UPPER_LIMIT", 1000)
+    )
+
     try:
         opensearch.create_index(index_name=index_name, mappings=mappings)
+
+        current_index_mapping_properties = (
+            opensearch.client.indices.get_mapping(index=index_name)
+            .get(index_name, {})
+            .get("mappings", {})
+            .get("properties", {})
+        )
+        unique_keys = set(current_index_mapping_properties)
+
+        try:
+            current_limit = int(
+                opensearch.client.indices.get_settings(index=index_name)[index_name][
+                    "settings"
+                ]["index"]["mapping"]["total_fields"]["limit"]
+            )
+        except KeyError:
+            current_limit = 1000
+
         for event in read_and_validate(
             file_handle=file_handle,
             headers_mapping=headers_mapping,
             delimiter=delimiter,
         ):
+            unique_keys.update(event.keys())
+            # Calculating the new limit. Each unique key is counted twice due to
+            # the "keyword" type plus a percentage buffer (default 10%).
+            new_limit = int((len(unique_keys) * 2) * (1 + limit_buffer_percentage))
+            # To prevent mapping explosions we still check against an upper
+            # mapping limit set in timesketch.conf (default: 1000).
+            if new_limit > upper_mapping_limit:
+                METRICS["worker_mapping_increase_limit_exceeded"].labels(
+                    index_name=index_name
+                ).inc()
+                error_msg = (
+                    f"Error: Indexing timeline [{timeline_name}] into [{index_name}] "
+                    f"exceeds the upper field mapping limit of {upper_mapping_limit}. "
+                    f"New calculated mapping limit: {new_limit}. Review your "
+                    "import data or adjust OPENSEARCH_MAPPING_UPPER_LIMIT."
+                )
+                logger.error(error_msg)
+                _set_datasource_status(
+                    timeline_id, file_path, "fail", error_message=str(error_msg)
+                )
+                return None
+
+            if new_limit > current_limit and current_limit < upper_mapping_limit:
+                new_limit = min(new_limit, upper_mapping_limit)
+                opensearch.client.indices.put_settings(
+                    index=index_name,
+                    body={"index.mapping.total_fields.limit": new_limit},
+                )
+                METRICS["worker_mapping_increase"].labels(
+                    index_name=index_name, timeline_id=timeline_id
+                ).set(new_limit)
+                logger.info(
+                    "OpenSearch index [%s] mapping limit increased to: %d",
+                    index_name,
+                    new_limit,
+                )
+                current_limit = new_limit
+
             opensearch.import_event(index_name, event, timeline_id=timeline_id)
             final_counter += 1
 
@@ -851,6 +1058,7 @@ def run_csv_jsonl(
         results = opensearch.flush_queued_events()
 
         error_container = results.get("error_container", {})
+        error_count = len(error_container.get(index_name, {}).get("errors", []))
         error_msg = get_import_errors(
             error_container=error_container,
             index_name=index_name,
@@ -868,10 +1076,15 @@ def run_csv_jsonl(
     except Exception as e:  # pylint: disable=broad-except
         # Mark the searchindex and timelines as failed and exit the task
         error_msg = traceback.format_exc()
-        _set_datasource_status(timeline_id, file_path, "fail", error_message=error_msg)
+        _set_datasource_status(
+            timeline_id, file_path, "fail", error_message=str(error_msg)
+        )
         logger.error("Error: {0!s}\n{1:s}".format(e, error_msg))
         return None
 
+    METRICS["worker_events_added"].labels(
+        index_name=index_name, timeline_id=timeline_id, source_type=source_type
+    ).set(final_counter)
     if error_count:
         logger.info(
             "Index timeline: [{0:s}] to index [{1:s}] - {2:d} out of {3:d} "
@@ -890,8 +1103,14 @@ def run_csv_jsonl(
         )
 
     # Set status to ready when done
-    _set_datasource_status(timeline_id, file_path, "ready", error_message=error_msg)
+    _set_datasource_status(
+        timeline_id, file_path, "ready", error_message=str(error_msg)
+    )
 
+    time_took_to_run = time.time() - time_start
+    METRICS["worker_run_time"].labels(
+        index_name=index_name, timeline_id=timeline_id, source_type=source_type
+    ).observe(time_took_to_run)
     return index_name
 
 

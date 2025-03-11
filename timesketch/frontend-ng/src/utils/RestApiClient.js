@@ -111,6 +111,9 @@ export default {
   getSketchTimelineAnalysis(sketchId, timelineId) {
     return RestApiClient.get('/sketches/' + sketchId + '/timelines/' + timelineId + '/analysis/')
   },
+  getTimelineFields(sketchId, timelineId){
+    return RestApiClient.get('/sketches/' + sketchId + '/timelines/' + timelineId + '/fields/')
+  },
   saveSketchTimeline(sketchId, timelineId, name, description, color) {
     let formData = {
       name: name,
@@ -274,6 +277,12 @@ export default {
   getAggregations(sketchId) {
     return RestApiClient.get('/sketches/' + sketchId + '/aggregation/')
   },
+  getAggregationById(sketchId, aggregationId) {
+    return RestApiClient.get('/sketches/' + sketchId + '/aggregation/' + aggregationId + '/')
+  },
+  deleteAggregationById(sketchId, aggregationId) {
+    return RestApiClient.delete('/sketches/' + sketchId + '/aggregation/' + aggregationId + '/')
+  },
   getAggregationGroups(sketchId) {
     return RestApiClient.get('/sketches/' + sketchId + '/aggregation/group/')
   },
@@ -288,7 +297,7 @@ export default {
       name: name,
       description: aggregation.description,
       agg_type: aggregation.name,
-      chart_type: formData['supported_charts'],
+      chart_type: formData['supported_charts'] || formData['aggregator_parameters']['chart_type'],
       parameters: formData,
     }
     return RestApiClient.post('/sketches/' + sketchId + '/aggregation/', newFormData)
@@ -502,6 +511,9 @@ export default {
     }
     return RestApiClient.post('/unfurl/', formData)
   },
+  getSystemSettings() {
+    return RestApiClient.get('/settings/')
+  },
   getUserSettings() {
     return RestApiClient.get('/users/me/settings/')
   },
@@ -509,4 +521,10 @@ export default {
     let formData = { settings: settings }
     return RestApiClient.post('/users/me/settings/', formData)
   },
+  llmRequest(sketchId, featureName, formData) {
+    formData = formData || {}
+    formData.feature = featureName
+  
+    return RestApiClient.post(`/sketches/${sketchId}/llm/`, formData)
+  }
 }

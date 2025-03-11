@@ -35,6 +35,7 @@ const defaultState = (currentUser) => {
     currentSearchNode: null,
     currentUser: currentUser,
     settings: {},
+    systemSettings: {},
     activeContext: {
       scenario: {},
       facet: {},
@@ -48,6 +49,7 @@ const defaultState = (currentUser) => {
     },
     contextLinkConf: {},
     sketchAnalyzerList: {},
+    savedVisualizations: [],
     activeAnalyses: [],
     analyzerResults: [],
     enabledTimelines: [],
@@ -76,6 +78,9 @@ export default new Vuex.Store({
     SET_TIMELINE_TAGS(state, buckets) {
       Vue.set(state, 'tags', buckets)
     },
+    SET_EVENT_LABELS(state, payload) {
+      Vue.set(state.meta, 'filter_labels', payload)
+    },
     SET_DATA_TYPES(state, payload) {
       let buckets = payload.objects[0]['field_bucket']['buckets']
       Vue.set(state, 'dataTypes', buckets)
@@ -89,6 +94,9 @@ export default new Vuex.Store({
     SET_SIGMA_LIST(state, payload) {
       Vue.set(state, 'sigmaRuleList', payload['objects'])
       Vue.set(state, 'sigmaRuleList_count', payload['meta']['rules_count'])
+    },
+    SET_VISUALIZATION_LIST(state, payload) {
+      Vue.set(state, 'savedVisualizations', payload)
     },
     SET_ACTIVE_USER(state, payload) {
       ApiClient.getLoggedInUser().then((response) => {
@@ -111,7 +119,7 @@ export default new Vuex.Store({
       let payload = {
         scenario: state.activeContext.scenario,
         facet: state.activeContext.facet,
-        question: {}
+        question: {},
       }
       Vue.set(state, 'activeContext', payload)
     },
@@ -135,6 +143,9 @@ export default new Vuex.Store({
     },
     SET_ANALYZER_LIST(state, payload) {
       Vue.set(state, 'sketchAnalyzerList', payload)
+    },
+    SET_SAVED_VISUALIZATIONS(state, payload) {
+      Vue.set(state, 'savedVisualizations', payload)
     },
     SET_ACTIVE_ANALYSES(state, payload) {
       Vue.set(state, 'activeAnalyses', payload)
@@ -171,6 +182,9 @@ export default new Vuex.Store({
         const freshEnabledTimelines = [...state.enabledTimelines, payload]
         Vue.set(state, 'enabledTimelines', freshEnabledTimelines)
       }
+    },
+    SET_SYSTEM_SETTINGS(state, payload) {
+      Vue.set(state, 'systemSettings', payload || {})
     },
     SET_USER_SETTINGS(state, payload) {
       Vue.set(state, 'settings', payload.objects[0] || {})
@@ -228,6 +242,19 @@ export default new Vuex.Store({
         })
         .catch((e) => {})
     },
+    updateEventLabels(context, {label: inputLabel, num}) {
+      if (!inputLabel || !num)  {
+        return
+      }
+      let allLabels = context.state.meta.filter_labels
+      let label = allLabels.find(label => label.label === inputLabel);
+      if (label !== undefined) {
+        label.count += num
+      } else {
+        allLabels.push({ label: inputLabel, count: num })
+      }
+      context.commit('SET_EVENT_LABELS', allLabels)
+  },
     updateTimelineTags(context, payload) {
       if (!context.state.sketch.active_timelines.length) {
         return
@@ -276,6 +303,13 @@ export default new Vuex.Store({
       ApiClient.getSigmaRuleList()
         .then((response) => {
           context.commit('SET_SIGMA_LIST', response.data)
+        })
+        .catch((e) => {})
+    },
+    updateSavedVisualizationList(context, sketchId) {
+      ApiClient.getAggregations(sketchId)
+        .then((response) => {
+          context.commit('SET_VISUALIZATION_LIST', response.data.objects[0] || [])
         })
         .catch((e) => {})
     },
@@ -330,11 +364,12 @@ export default new Vuex.Store({
             response.data.forEach((analyzer) => {
               analyzerList[analyzer.name] = analyzer
             })
-        }
-        context.commit('SET_ANALYZER_LIST', analyzerList)
-      }).catch((e) => {
-        console.error(e)
-      })
+          }
+          context.commit('SET_ANALYZER_LIST', analyzerList)
+        })
+        .catch((e) => {
+          console.error(e)
+        })
     },
     updateActiveAnalyses(context, activeAnalyses) {
       context.commit('SET_ACTIVE_ANALYSES', activeAnalyses)
@@ -356,6 +391,15 @@ export default new Vuex.Store({
     },
     toggleEnabledTimeline(context, timelineId) {
       context.commit('TOGGLE_ENABLED_TIMELINE', timelineId)
+    },
+    updateSystemSettings(context) {
+      return ApiClient.getSystemSettings()
+        .then((response) => {
+          context.commit('SET_SYSTEM_SETTINGS', response.data)
+        })
+        .catch((e) => {
+          console.error(e)
+        })
     },
     updateUserSettings(context) {
       return ApiClient.getUserSettings()

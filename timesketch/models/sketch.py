@@ -351,6 +351,10 @@ class Analysis(GenericAttributeMixin, LabelMixin, StatusMixin, CommentMixin, Bas
     sketch_id = Column(Integer, ForeignKey("sketch.id"))
     timeline_id = Column(Integer, ForeignKey("timeline.id"))
     searchindex_id = Column(Integer, ForeignKey("searchindex.id"))
+    approach_id = Column(Integer, ForeignKey("investigativequestionapproach.id"))
+    question_conclusion_id = Column(
+        Integer, ForeignKey("investigativequestionconclusion.id")
+    )
 
 
 class AnalysisSession(LabelMixin, StatusMixin, CommentMixin, BaseModel):
@@ -537,6 +541,7 @@ class Scenario(LabelMixin, StatusMixin, CommentMixin, GenericAttributeMixin, Bas
     description = Column(UnicodeText())
     summary = Column(UnicodeText())
     dfiq_identifier = Column(UnicodeText())
+    uuid = Column(UnicodeText())
     spec_json = Column(UnicodeText())
     sketch_id = Column(Integer, ForeignKey("sketch.id"))
     user_id = Column(Integer, ForeignKey("user.id"))
@@ -639,6 +644,7 @@ class Facet(LabelMixin, StatusMixin, CommentMixin, GenericAttributeMixin, BaseMo
     display_name = Column(UnicodeText())
     description = Column(UnicodeText())
     dfiq_identifier = Column(UnicodeText())
+    uuid = Column(UnicodeText())
     spec_json = Column(UnicodeText())
     sketch_id = Column(Integer, ForeignKey("sketch.id"))
     user_id = Column(Integer, ForeignKey("user.id"))
@@ -722,6 +728,9 @@ class InvestigativeQuestionConclusion(LabelMixin, StatusMixin, CommentMixin, Bas
     saved_aggregations = relationship(
         "Aggregation", secondary=questionconclusion_aggregation_association_table
     )
+    analysis = relationship(
+        "Analysis", backref="investigativequestionconclusion", lazy="select"
+    )
 
 
 class InvestigativeQuestion(
@@ -736,6 +745,7 @@ class InvestigativeQuestion(
     display_name = Column(UnicodeText())
     description = Column(UnicodeText())
     dfiq_identifier = Column(UnicodeText())
+    uuid = Column(UnicodeText())
     spec_json = Column(UnicodeText())
     sketch_id = Column(Integer, ForeignKey("sketch.id"))
     user_id = Column(Integer, ForeignKey("user.id"))
@@ -803,4 +813,7 @@ class InvestigativeQuestionApproach(
     )
     search_histories = relationship(
         "SearchHistory", backref="investigativequestionapproach", lazy="select"
+    )
+    analysis = relationship(
+        "Analysis", backref="investigativequestionapproach", lazy="dynamic"
     )

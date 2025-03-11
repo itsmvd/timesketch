@@ -56,6 +56,7 @@ from .resources.story import StoryResource
 from .resources.explore import QueryResource
 from .resources.timeline import TimelineResource
 from .resources.timeline import TimelineListResource
+from .resources.timeline import TimelineFieldsResource
 from .resources.searchindex import SearchIndexListResource
 from .resources.searchindex import SearchIndexResource
 from .resources.session import SessionResource
@@ -75,6 +76,8 @@ from .resources.graph import GraphCacheResource
 from .resources.intelligence import TagMetadataResource
 from .resources.contextlinks import ContextLinkConfigResource
 from .resources.unfurl import UnfurlResource
+from .resources.llm import LLMResource
+from .resources.settings import SystemSettingsResource
 
 from .resources.scenarios import ScenarioTemplateListResource
 from .resources.scenarios import ScenarioListResource
@@ -165,6 +168,10 @@ API_ROUTES = [
         TimelineResource,
         "/sketches/<int:sketch_id>/timelines/<int:timeline_id>/",
     ),
+    (
+        TimelineFieldsResource,
+        "/sketches/<int:sketch_id>/timelines/<int:timeline_id>/fields/",
+    ),
     (SearchIndexListResource, "/searchindices/"),
     (SearchIndexResource, "/searchindices/<int:searchindex_id>/"),
     (
@@ -194,6 +201,8 @@ API_ROUTES = [
     (TagMetadataResource, "/intelligence/tagmetadata/"),
     (ContextLinkConfigResource, "/contextlinks/"),
     (UnfurlResource, "/unfurl/"),
+    (LLMResource, "/sketches/<int:sketch_id>/llm/"),
+    (SystemSettingsResource, "/settings/"),
     # Scenario templates
     (ScenarioTemplateListResource, "/scenarios/"),
     # Scenarios
